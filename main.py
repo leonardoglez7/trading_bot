@@ -1,5 +1,6 @@
 """
-🤖 TRADING BOT SIMPLIFICADO - COMPATIBLE RENDER
+🤖 TRADING BOT ULTRA SIMPLE - SIN PANDAS
+100% compatible con Render
 """
 
 import os
@@ -7,8 +8,6 @@ import time
 import random
 import json
 import requests
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 import threading
@@ -21,148 +20,329 @@ class Config:
         self.SYMBOL = os.getenv('SYMBOL', 'EURUSD')
         self.CAPITAL = float(os.getenv('CAPITAL_INICIAL', '100.00'))
         self.RIESGO = float(os.getenv('RIESGO_POR_OPERACION', '0.20'))
+        self.SL_PIPS = int(os.getenv('STOP_LOSS_PIPS', '7'))
+        self.TP_PIPS = int(os.getenv('TAKE_PROFIT_PIPS', '14'))
         
-        print("="*50)
-        print("🤖 BOT CONFIGURADO")
-        print(f"Telegram: {'✅' if self.TELEGRAM_TOKEN else '❌'}")
+        print("="*60)
+        print("🤖 TRADING BOT - SIN PANDAS")
+        print("="*60)
+        print(f"Telegram: {'✅ CONFIGURADO' if self.TELEGRAM_TOKEN else '❌ NO'}")
+        print(f"Símbolo: {self.SYMBOL}")
         print(f"Capital: ${self.CAPITAL:.2f}")
-        print("="*50)
+        print(f"Riesgo/op: ${self.RIESGO:.2f}")
+        print(f"Stop Loss: {self.SL_PIPS} pips")
+        print(f"Take Profit: {self.TP_PIPS} pips")
+        print("="*60)
 
-# ================= SIMPLE API =================
-def get_market_data():
-    """Obtener datos simulados del mercado"""
-    try:
-        # Simular precio EURUSD
-        base = 1.08500
-        change = random.uniform(-0.001, 0.001)
-        price = base + change
+# ================= MERCADO SIMULADO =================
+class MercadoSimulado:
+    """Simula precios sin necesidad de pandas"""
+    
+    def __init__(self, simbolo="EURUSD"):
+        self.simbolo = simbolo
+        self.precio_base = 1.08500
+        
+    def obtener_precio(self):
+        """Generar precio simulado"""
+        cambio = random.uniform(-0.0005, 0.0005)  # +/- 5 pips
+        self.precio_base += cambio
+        
+        # Mantener rango realista
+        self.precio_base = max(1.05000, min(1.12000, self.precio_base))
         
         return {
-            'price': round(price, 5),
-            'change': round(change * 10000, 1),  # en pips
-            'timestamp': datetime.now().isoformat(),
-            'real': False,
-            'note': 'Datos simulados para prueba'
+            'bid': round(self.precio_base - 0.00002, 5),
+            'ask': round(self.precio_base, 5),
+            'time': datetime.now().isoformat(),
+            'simbolo': self.simbolo
         }
-    except:
-        return {'price': 1.08500, 'error': 'No data'}
+    
+    def calcular_rsi_simple(self, precio_actual, historial):
+        """Calcular RSI simple sin pandas"""
+        if len(historial) < 14:
+            return 50.0
+        
+        ganancias = []
+        perdidas = []
+        
+        for i in range(1, min(15, len(historial))):
+            cambio = historial[-i] - historial[-i-1] if i < len(historial) else 0
+            if cambio > 0:
+                ganancias.append(cambio)
+            else:
+                perdidas.append(abs(cambio))
+        
+        avg_gain = sum(ganancias) / len(ganancias) if ganancias else 0
+        avg_loss = sum(perdidas) / len(perdidas) if perdidas else 0.001  # Evitar división por 0
+        
+        if avg_loss == 0:
+            rsi = 100
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+        
+        return round(rsi, 2)
 
 # ================= TRADING BOT =================
 class TradingBot:
     def __init__(self, config):
         self.config = config
-        self.running = False
-        self.stats = {
-            'capital': config.CAPITAL,
-            'trades_today': 0,
-            'profit_today': 0.0,
-            'loss_today': 0.0,
-            'last_update': datetime.now().isoformat()
-        }
-        print("Bot inicializado")
-    
-    def analyze(self):
-        """Analizar mercado simple"""
-        data = get_market_data()
-        price = data['price']
+        self.mercado = MercadoSimulado(config.SYMBOL)
+        self.historial_precios = []
         
-        # Señal aleatoria para demo
-        if random.random() > 0.7:  # 30% chance de señal
-            signal_type = random.choice(['BUY', 'SELL'])
-            confidence = random.randint(65, 85)
-            
+        self.estado = {
+            'activo': False,
+            'capital': config.CAPITAL,
+            'operaciones_hoy': 0,
+            'ganancias_hoy': 0.0,
+            'perdidas_hoy': 0.0,
+            'precio_actual': 0.0,
+            'rsi_actual': 50.0,
+            'ultima_actualizacion': datetime.now().isoformat(),
+            'modo': 'SIMULADO SIN PANDAS'
+        }
+        
+        print("✅ Bot inicializado sin pandas")
+    
+    def dentro_horario(self):
+        """Verificar horario de trading"""
+        ahora = datetime.utcnow()
+        if ahora.weekday() >= 5:
+            return False
+        
+        hora_actual = ahora.strftime("%H:%M")
+        return "08:00" <= hora_actual <= "12:00"
+    
+    def analizar_mercado(self):
+        """Analizar mercado sin pandas"""
+        if not self.dentro_horario():
+            return None
+        
+        # Obtener precio
+        precio_data = self.mercado.obtener_precio()
+        precio_actual = precio_data['ask']
+        
+        # Actualizar historial
+        self.historial_precios.append(precio_actual)
+        if len(self.historial_precios) > 100:
+            self.historial_precios = self.historial_precios[-50:]  # Mantener últimos 50
+        
+        # Calcular RSI
+        rsi = self.mercado.calcular_rsi_simple(precio_actual, self.historial_precios)
+        self.estado['precio_actual'] = precio_actual
+        self.estado['rsi_actual'] = rsi
+        
+        # Media móvil simple (reemplazo de EMA)
+        if len(self.historial_precios) >= 9:
+            sma_9 = sum(self.historial_precios[-9:]) / 9
+        else:
+            sma_9 = precio_actual
+        
+        # Detectar señales
+        if precio_actual > sma_9 and rsi < 35:
             return {
-                'type': signal_type,
-                'price': price,
-                'confidence': confidence,
-                'time': datetime.now().isoformat()
+                'tipo': 'BUY',
+                'precio': precio_actual,
+                'rsi': rsi,
+                'sma': sma_9,
+                'confianza': 75,
+                'timestamp': datetime.now().isoformat()
             }
+        elif precio_actual < sma_9 and rsi > 65:
+            return {
+                'tipo': 'SELL',
+                'precio': precio_actual,
+                'rsi': rsi,
+                'sma': sma_9,
+                'confianza': 75,
+                'timestamp': datetime.now().isoformat()
+            }
+        
         return None
     
-    def execute_trade(self, signal):
+    def ejecutar_operacion(self, senal):
         """Ejecutar operación simulada"""
-        # 70% chance de ganar
-        wins = random.random() < 0.7
+        # Probabilidad basada en confianza
+        prob_exito = senal['confianza'] / 100 * 0.8
         
-        if wins:
-            result = self.config.RIESGO * 2
-            self.stats['profit_today'] += result
-            status = "WIN"
+        if random.random() < prob_exito:
+            resultado = self.config.RIESGO * 2  # Ratio 1:2
+            estado = "✅ GANADA"
+            self.estado['ganancias_hoy'] += resultado
         else:
-            result = -self.config.RIESGO
-            self.stats['loss_today'] += abs(result)
-            status = "LOSS"
+            resultado = -self.config.RIESGO
+            estado = "❌ PERDIDA"
+            self.estado['perdidas_hoy'] += abs(resultado)
         
-        self.stats['capital'] += result
-        self.stats['trades_today'] += 1
+        self.estado['capital'] += resultado
+        self.estado['operaciones_hoy'] += 1
         
-        trade = {
+        operacion = {
             'id': datetime.now().strftime('%H%M%S'),
-            'type': signal['type'],
-            'price': signal['price'],
-            'result': result,
-            'status': status,
-            'confidence': signal['confidence']
+            'tipo': senal['tipo'],
+            'precio': senal['precio'],
+            'resultado': resultado,
+            'estado': estado,
+            'confianza': senal['confianza'],
+            'timestamp': senal['timestamp']
         }
         
-        # Notificar Telegram si configurado
-        if self.config.TELEGRAM_TOKEN:
-            self.notify_telegram(trade)
+        # Notificar Telegram
+        self.notificar_telegram(operacion)
         
-        print(f"Trade {trade['status']}: ${trade['result']:.2f}")
-        return trade
+        print(f"\n📊 {operacion['estado']} {operacion['tipo']}")
+        print(f"   Precio: {operacion['precio']:.5f}")
+        print(f"   Resultado: ${operacion['resultado']:.2f}")
+        print(f"   Capital: ${self.estado['capital']:.2f}")
+        
+        return operacion
     
-    def notify_telegram(self, trade):
+    def notificar_telegram(self, operacion):
         """Enviar notificación a Telegram"""
+        if not self.config.TELEGRAM_TOKEN:
+            return
+        
         try:
-            emoji = "✅" if trade['result'] > 0 else "❌"
-            msg = (
-                f"{emoji} *Trade {trade['status']}*\n\n"
-                f"Type: {trade['type']}\n"
-                f"Price: {trade['price']:.5f}\n"
-                f"Result: ${trade['result']:.2f}\n"
-                f"Confidence: {trade['confidence']}%\n"
-                f"Time: {datetime.now().strftime('%H:%M')}"
+            mensaje = (
+                f"{operacion['estado']} *Operación {operacion['tipo']}*\n\n"
+                f"• Par: {self.config.SYMBOL}\n"
+                f"• Precio: {operacion['precio']:.5f}\n"
+                f"• Resultado: ${operacion['resultado']:.2f}\n"
+                f"• Confianza: {operacion['confianza']}%\n"
+                f"• Capital: ${self.estado['capital']:.2f}\n"
+                f"• Hora: {operacion['timestamp'][11:19]}\n"
+                f"• Modo: Simulación\n"
+                f"• Ops hoy: {self.estado['operaciones_hoy']}/5"
             )
             
             url = f"https://api.telegram.org/bot{self.config.TELEGRAM_TOKEN}/sendMessage"
             data = {
                 'chat_id': self.config.TELEGRAM_CHAT_ID,
-                'text': msg,
+                'text': mensaje,
+                'parse_mode': 'Markdown'
+            }
+            
+            requests.post(url, json=data, timeout=10)
+            print("📱 Notificación enviada a Telegram")
+            
+        except Exception as e:
+            print(f"❌ Error Telegram: {e}")
+    
+    def ciclo_trading(self):
+        """Ciclo principal"""
+        print("🔄 Iniciando ciclo de trading...")
+        
+        while self.estado['activo']:
+            try:
+                # Verificar límites
+                if (self.estado['operaciones_hoy'] >= 5 or
+                    self.estado['perdidas_hoy'] >= 0.40):
+                    print("🎯 Límites alcanzados")
+                    self.estado['activo'] = False
+                    break
+                
+                # Analizar
+                senal = self.analizar_mercado()
+                
+                if senal and senal['confianza'] >= 70:
+                    print(f"\n🔔 Señal {senal['tipo']} detectada!")
+                    print(f"   Precio: {senal['precio']:.5f}, RSI: {senal['rsi']:.1f}")
+                    
+                    # Esperar confirmación
+                    time.sleep(2)
+                    
+                    # Ejecutar
+                    self.ejecutar_operacion(senal)
+                    
+                    # Esperar antes de siguiente
+                    time.sleep(30)
+                
+                # Mostrar estado
+                hora = datetime.now().strftime("%H:%M:%S")
+                precio = self.estado.get('precio_actual', 0)
+                ops = self.estado['operaciones_hoy']
+                pl = self.estado['ganancias_hoy'] - self.estado['perdidas_hoy']
+                
+                print(f"[{hora}] {self.config.SYMBOL}: {precio:.5f} | Ops: {ops}/5 | P/L: ${pl:.2f}", end='\r')
+                
+                # Actualizar timestamp
+                self.estado['ultima_actualizacion'] = datetime.now().isoformat()
+                
+                # Esperar
+                time.sleep(15)
+                
+            except Exception as e:
+                print(f"\n❌ Error en ciclo: {e}")
+                time.sleep(30)
+    
+    def iniciar(self):
+        """Iniciar bot"""
+        self.estado['activo'] = True
+        
+        # Thread para trading
+        thread = threading.Thread(target=self.ciclo_trading, daemon=True)
+        thread.start()
+        
+        print("✅ Bot INICIADO")
+        
+        # Notificar Telegram
+        if self.config.TELEGRAM_TOKEN:
+            self.enviar_mensaje_telegram(
+                "🤖 *TRADING BOT INICIADO*\n\n"
+                f"• Símbolo: {self.config.SYMBOL}\n"
+                f"• Capital: ${self.estado['capital']:.2f}\n"
+                f"• Riesgo/op: ${self.config.RIESGO:.2f}\n"
+                f"• Horario: 08:00-12:00 UTC\n"
+                f"• Modo: Simulación\n"
+                f"• Estado: ACTIVO ✅"
+            )
+        
+        return True
+    
+    def enviar_mensaje_telegram(self, mensaje):
+        """Enviar mensaje simple"""
+        try:
+            url = f"https://api.telegram.org/bot{self.config.TELEGRAM_TOKEN}/sendMessage"
+            data = {
+                'chat_id': self.config.TELEGRAM_CHAT_ID,
+                'text': mensaje,
                 'parse_mode': 'Markdown'
             }
             requests.post(url, json=data, timeout=10)
         except:
             pass
     
-    def start(self):
-        """Iniciar bot"""
-        self.running = True
-        
-        # Thread para trading
-        def trading_loop():
-            while self.running and self.stats['trades_today'] < 5:
-                signal = self.analyze()
-                if signal:
-                    self.execute_trade(signal)
-                    time.sleep(30)  # Esperar 30s
-                time.sleep(10)  # Revisar cada 10s
-        
-        thread = threading.Thread(target=trading_loop, daemon=True)
-        thread.start()
-        
-        print("✅ Bot started")
-        return True
-    
-    def stop(self):
+    def detener(self):
         """Detener bot"""
-        self.running = False
-        print("🛑 Bot stopped")
+        self.estado['activo'] = False
+        
+        # Resumen
+        neto = self.estado['ganancias_hoy'] - self.estado['perdidas_hoy']
+        
+        print("\n" + "="*60)
+        print("🛑 BOT DETENIDO - RESUMEN")
+        print("="*60)
+        print(f"Operaciones: {self.estado['operaciones_hoy']}")
+        print(f"Ganancias: ${self.estado['ganancias_hoy']:.2f}")
+        print(f"Pérdidas: ${self.estado['perdidas_hoy']:.2f}")
+        print(f"Neto: ${neto:.2f}")
+        print(f"Capital final: ${self.estado['capital']:.2f}")
+        print("="*60)
+        
+        # Notificar Telegram
+        if self.config.TELEGRAM_TOKEN:
+            self.enviar_mensaje_telegram(
+                "🛑 *BOT DETENIDO*\n\n"
+                f"• Operaciones: {self.estado['operaciones_hoy']}\n"
+                f"• Neto: ${neto:.2f}\n"
+                f"• Capital: ${self.estado['capital']:.2f}\n"
+                f"• Rendimiento: {(neto/self.config.CAPITAL*100):.1f}%"
+            )
     
     def get_status(self):
         """Obtener estado"""
-        self.stats['last_update'] = datetime.now().isoformat()
-        return self.stats
+        self.estado['ultima_actualizacion'] = datetime.now().isoformat()
+        return self.estado
 
 # ================= FLASK APP =================
 app = Flask(__name__)
@@ -172,24 +352,38 @@ bot = None
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Trading Bot',
-        'version': '1.0',
-        'endpoints': ['/', '/health', '/status', '/price']
+        'service': 'Trading Bot (sin pandas)',
+        'version': '2.0',
+        'features': [
+            'Bot de trading simple',
+            'Notificaciones Telegram',
+            'Gestión de riesgo',
+            'Simulación de mercado',
+            '100% compatible Render'
+        ]
     })
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'time': datetime.now().isoformat()})
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'python_version': '3.10.0'
+    })
 
 @app.route('/status')
 def status():
     if bot:
         return jsonify(bot.get_status())
-    return jsonify({'error': 'Bot not initialized'})
+    return jsonify({'error': 'Bot no inicializado'})
 
-@app.route('/price')
-def price():
-    return jsonify(get_market_data())
+@app.route('/precio')
+def precio():
+    """Obtener precio simulado"""
+    if bot:
+        precio_data = bot.mercado.obtener_precio()
+        return jsonify(precio_data)
+    return jsonify({'price': 1.08500, 'note': 'Bot no activo'})
 
 @app.route('/start', methods=['POST'])
 def start():
@@ -198,29 +392,68 @@ def start():
         config = Config()
         bot = TradingBot(config)
     
-    bot.start()
-    return jsonify({'success': True, 'message': 'Bot started'})
+    bot.iniciar()
+    return jsonify({'success': True, 'message': 'Bot iniciado'})
 
 @app.route('/stop', methods=['POST'])
 def stop():
     global bot
     if bot:
-        bot.stop()
-        return jsonify({'success': True, 'message': 'Bot stopped'})
-    return jsonify({'error': 'Bot not running'})
+        bot.detener()
+        return jsonify({'success': True, 'message': 'Bot detenido'})
+    return jsonify({'error': 'Bot no inicializado'})
+
+# ================= PING AUTOMÁTICO =================
+def keep_alive():
+    """Mantener activo el servidor"""
+    def ping():
+        while True:
+            try:
+                url = os.getenv('RENDER_EXTERNAL_URL', '')
+                if url:
+                    requests.get(f'{url}/health', timeout=10)
+                    print(f"🏓 Ping: {datetime.now().strftime('%H:%M:%S')}")
+            except:
+                print("⚠️  Error en ping")
+            time.sleep(300)
+    
+    thread = threading.Thread(target=ping, daemon=True)
+    thread.start()
 
 # ================= INICIALIZACIÓN =================
 def init():
     global bot
-    print("🚀 Initializing Trading Bot...")
+    
+    print("\n" + "="*60)
+    print("🚀 TRADING BOT - SIN PANDAS")
+    print("="*60)
+    
     config = Config()
     bot = TradingBot(config)
     
-    # Auto-start if Telegram configured
+    # Iniciar sistema de ping
+    keep_alive()
+    
+    # Iniciar automáticamente si Telegram configurado
     if config.TELEGRAM_TOKEN:
-        print("🤖 Telegram configured - Bot ready")
+        hora_actual = datetime.utcnow().strftime("%H:%M")
+        if "08:00" <= hora_actual <= "12:00":
+            print("⏰ Horario activo - Iniciando bot...")
+            bot.iniciar()
+        else:
+            print(f"⏰ Fuera de horario ({hora_actual}) - Bot listo")
     else:
-        print("⚠️  Telegram not configured - Use web endpoints")
+        print("⚠️  Telegram no configurado - Use endpoints web")
+    
+    print("\n✅ Sistema listo")
+    print("📊 Endpoints:")
+    print("   • /        - Información")
+    print("   • /health  - Health check")
+    print("   • /status  - Estado del bot")
+    print("   • /precio  - Precio simulado")
+    print("   • /start   - POST iniciar bot")
+    print("   • /stop    - POST detener bot")
+    print("="*60)
 
 # ================= EJECUCIÓN =================
 if __name__ == '__main__':
