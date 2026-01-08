@@ -1,7 +1,6 @@
 """
-🤖 TRADING BOT COMPLETO + TELEGRAM CONTROL
-Versión: 4.0 - Server + Telegram
-Autor: Asistente Trading
+🤖 TRADING BOT COMPLETO - Versión Render
+Control por Telegram + Server 24/7
 """
 
 import MetaTrader5 as mt5
@@ -12,52 +11,47 @@ import asyncio
 import logging
 import json
 import os
+import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-from dataclasses import dataclass, asdict
-from threading import Thread
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, jsonify
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # ================= CONFIGURACIÓN =================
-@dataclass
 class Config:
-    """Configuración del sistema"""
-    # MT5 Credenciales (DEMO)
-    MT5_ACCOUNT: int = 12345678
-    MT5_PASSWORD: str = "tu_password_demo"
-    MT5_SERVER: str = "MetaQuotes-Demo"
+    """Configuración - SE LLENARÁ CON VARIABLES DE ENTORNO"""
+    # MT5 (se configurarán en Render)
+    MT5_ACCOUNT = "5044586613"
+    MT5_PASSWORD = "*pP0YvRv"
+    MT5_SERVER = "MetaQuotes-Demo"
     
-    # Telegram Bot Token (OBTÉN UNO GRATIS)
-    TELEGRAM_TOKEN: str = "TU_TELEGRAM_BOT_TOKEN"  # Obtén de @BotFather
-    TELEGRAM_CHAT_ID: str = "TU_CHAT_ID"  # Tu ID de chat
+    # Telegram (se configurarán en Render)
+    TELEGRAM_TOKEN = "8595969076:AAHRJ8cT4g_1CPISEySdl7sYglS5UowTiJg"
+    TELEGRAM_CHAT_ID = "6571763499"
     
     # Trading
-    SYMBOL: str = "EURUSD"
-    TIMEFRAME: str = "M1"
-    CAPITAL_DEMO: float = 100.00
-    RIESGO_POR_OPERACION: float = 0.20
-    STOP_LOSS_PIPS: int = 7
-    TAKE_PROFIT_PIPS: int = 14
+    SYMBOL = "EURUSD"
+    TIMEFRAME = "M1"
+    CAPITAL_DEMO = 100.00
+    RIESGO_POR_OPERACION = 0.20
+    STOP_LOSS_PIPS = 7
+    TAKE_PROFIT_PIPS = 14
     
     # Límites
-    MAX_OPERACIONES_DIA: int = 5
-    MAX_PERDIDA_DIARIA: float = 0.40
-    OBJETIVO_DIARIO: float = 0.80
+    MAX_OPERACIONES_DIA = 5
+    MAX_PERDIDA_DIARIA = 0.40
+    OBJETIVO_DIARIO = 0.80
     
-    # Horarios (UTC)
-    HORA_INICIO: str = "08:00"  # 8 AM Europa
-    HORA_FIN: str = "12:00"
-    
-    # Server
-    SERVER_URL: str = ""  # Para webhooks si necesitas
+    # Horarios UTC (8:00-12:00 hora Europa)
+    HORA_INICIO = "08:00"
+    HORA_FIN = "12:00"
 
 # ================= TRADING BOT =================
 class TradingBot:
-    def __init__(self, config: Config, telegram_bot=None):
+    def __init__(self, config: Config):
         self.config = config
-        self.telegram_bot = telegram_bot
         self.estado = {
             "activo": False,
             "operaciones_hoy": 0,
@@ -65,15 +59,15 @@ class TradingBot:
             "perdidas_hoy": 0.0,
             "perdidas_seguidas": 0,
             "capital": config.CAPITAL_DEMO,
-            "ultima_senal": None,
-            "operaciones": [],
-            "modo": "DEMO"
+            "modo": "DEMO",
+            "conectado": False,
+            "ultima_actualizacion": datetime.now().isoformat()
         }
         self.scheduler = BackgroundScheduler()
         self.setup_logging()
         
     def setup_logging(self):
-        """Configurar logging"""
+        """Configurar sistema de logs"""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -84,59 +78,60 @@ class TradingBot:
         )
         self.logger = logging.getLogger(__name__)
     
-    async def enviar_telegram(self, mensaje: str):
-        """Enviar mensaje a Telegram"""
-        if self.telegram_bot and self.config.TELEGRAM_CHAT_ID:
-            try:
-                await self.telegram_bot.send_message(
-                    chat_id=self.config.TELEGRAM_CHAT_ID,
-                    text=mensaje
-                )
-            except Exception as e:
-                self.logger.error(f"Error enviando a Telegram: {e}")
+    def cargar_config(self):
+        """Cargar configuración desde variables de entorno"""
+        self.config.MT5_ACCOUNT = os.getenv('MT5_ACCOUNT', '')
+        self.config.MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
+        self.config.MT5_SERVER = os.getenv('MT5_SERVER', 'MetaQuotes-Demo')
+        self.config.TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
+        self.config.TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+        
+        self.logger.info("✅ Configuración cargada desde variables de entorno")
     
     def conectar_mt5(self) -> bool:
         """Conectar a MT5"""
         try:
             if not mt5.initialize():
-                self.logger.error("MT5 no pudo inicializarse")
+                self.logger.error("❌ No se pudo inicializar MT5")
                 return False
             
+            account = int(self.config.MT5_ACCOUNT) if self.config.MT5_ACCOUNT else 0
             authorized = mt5.login(
-                login=self.config.MT5_ACCOUNT,
+                login=account,
                 password=self.config.MT5_PASSWORD,
                 server=self.config.MT5_SERVER
             )
             
             if authorized:
-                self.logger.info("✅ Conectado a MT5")
-                asyncio.run(self.enviar_telegram("✅ Bot conectado a MT5"))
+                info = mt5.account_info()
+                self.logger.info(f"✅ Conectado a MT5 - Balance: ${info.balance:.2f}")
+                self.estado['conectado'] = True
                 return True
             else:
-                self.logger.error(f"Error login MT5: {mt5.last_error()}")
+                self.logger.error(f"❌ Error login MT5: {mt5.last_error()}")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Error conectando MT5: {e}")
+            self.logger.error(f"❌ Error conectando MT5: {e}")
             return False
     
     def dentro_horario(self) -> bool:
-        """Verificar horario de trading"""
+        """Verificar si estamos en horario de trading"""
         ahora = datetime.utcnow()
-        if ahora.weekday() >= 5:
+        if ahora.weekday() >= 5:  # Fin de semana
             return False
         
         hora_actual = ahora.strftime("%H:%M")
         return self.config.HORA_INICIO <= hora_actual <= self.config.HORA_FIN
     
-    def obtener_datos(self) -> Optional[pd.DataFrame]:
+    def obtener_datos(self):
         """Obtener datos del mercado"""
         try:
             rates = mt5.copy_rates_from_pos(
                 self.config.SYMBOL,
-                getattr(mt5, f"TIMEFRAME_{self.config.TIMEFRAME}"),
+                mt5.TIMEFRAME_M1,
                 0,
-                100
+                50
             )
             
             if rates is None:
@@ -145,7 +140,7 @@ class TradingBot:
             df = pd.DataFrame(rates)
             df['time'] = pd.to_datetime(df['time'], unit='s')
             
-            # Indicadores
+            # Calcular indicadores
             df['ema9'] = df['close'].ewm(span=9).mean()
             df['ema21'] = df['close'].ewm(span=21).mean()
             
@@ -168,7 +163,7 @@ class TradingBot:
             self.logger.error(f"Error obteniendo datos: {e}")
             return None
     
-    def analizar_senal(self, df: pd.DataFrame) -> Optional[Dict]:
+    def analizar_senal(self, df):
         """Analizar y detectar señales"""
         if df is None or len(df) < 20:
             return None
@@ -179,35 +174,33 @@ class TradingBot:
         # Señal COMPRA
         if (ultimo['close'] > ultimo['ema9'] and
             ultimo['rsi'] < 35 and
-            anterior['rsi'] < ultimo['rsi'] and
-            ultimo['close'] <= ultimo['bb_lower'] * 1.0002):
+            anterior['rsi'] < ultimo['rsi']):
             
             return {
                 'tipo': 'BUY',
                 'precio': ultimo['close'],
                 'rsi': ultimo['rsi'],
                 'confianza': 75,
-                'timestamp': datetime.now()
+                'timestamp': datetime.now().isoformat()
             }
         
         # Señal VENTA
         elif (ultimo['close'] < ultimo['ema9'] and
               ultimo['rsi'] > 65 and
-              anterior['rsi'] > ultimo['rsi'] and
-              ultimo['close'] >= ultimo['bb_upper'] * 0.9998):
+              anterior['rsi'] > ultimo['rsi']):
             
             return {
                 'tipo': 'SELL',
                 'precio': ultimo['close'],
                 'rsi': ultimo['rsi'],
                 'confianza': 75,
-                'timestamp': datetime.now()
+                'timestamp': datetime.now().isoformat()
             }
         
         return None
     
-    def ejecutar_operacion(self, senal: Dict) -> bool:
-        """Ejecutar operación"""
+    def ejecutar_operacion(self, senal):
+        """Ejecutar operación de trading"""
         try:
             symbol_info = mt5.symbol_info(self.config.SYMBOL)
             tick = mt5.symbol_info_tick(self.config.SYMBOL)
@@ -236,7 +229,7 @@ class TradingBot:
                 "sl": sl,
                 "tp": tp,
                 "magic": 100234,
-                "comment": f"AutoBot_{senal['tipo']}",
+                "comment": f"RenderBot_{senal['tipo']}",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
@@ -244,27 +237,15 @@ class TradingBot:
             resultado = mt5.order_send(orden)
             
             if resultado.retcode == mt5.TRADE_RETCODE_DONE:
-                # Enviar notificación a Telegram
-                mensaje = f"""
-✅ OPERACIÓN EJECUTADA
-Tipo: {senal['tipo']}
-Par: {self.config.SYMBOL}
-Precio: {precio:.5f}
-Lote: {lote}
-SL: {sl:.5f}
-TP: {tp:.5f}
-Ticket: {resultado.order}
-                """
-                asyncio.run(self.enviar_telegram(mensaje))
-                
+                self.logger.info(f"✅ Operación {senal['tipo']} ejecutada - Ticket: {resultado.order}")
                 self.estado['operaciones_hoy'] += 1
-                self.logger.info(f"Operación ejecutada: {senal['tipo']}")
                 return True
             
+            self.logger.error(f"❌ Error en orden: {resultado.comment}")
             return False
             
         except Exception as e:
-            self.logger.error(f"Error ejecutando operación: {e}")
+            self.logger.error(f"❌ Error ejecutando operación: {e}")
             return False
     
     def ciclo_trading(self):
@@ -272,46 +253,53 @@ Ticket: {resultado.order}
         if not self.estado['activo'] or not self.dentro_horario():
             return
         
-        df = self.obtener_datos()
-        if df is None:
+        # Verificar límites
+        if (self.estado['operaciones_hoy'] >= self.config.MAX_OPERACIONES_DIA or
+            self.estado['perdidas_hoy'] >= self.config.MAX_PERDIDA_DIARIA):
+            self.logger.info("⏹️  Límites alcanzados, deteniendo trading")
+            self.estado['activo'] = False
             return
         
-        senal = self.analizar_senal(df)
+        df = self.obtener_datos()
+        senal = self.analizar_senal(df) if df is not None else None
         
         if senal and senal['confianza'] > 65:
-            self.logger.info(f"Señal detectada: {senal['tipo']}")
+            self.logger.info(f"🔔 Señal {senal['tipo']} detectada")
             
-            # Enviar alerta a Telegram
-            asyncio.run(self.enviar_telegram(
-                f"🔔 Señal {senal['tipo']} detectada\n"
-                f"Precio: {senal['precio']:.5f}\n"
-                f"RSI: {senal['rsi']:.1f}\n"
-                f"Confianza: {senal['confianza']}%"
-            ))
-            
-            # Ejecutar después de 2 segundos
+            # Pequeña espera para confirmación
             time.sleep(2)
+            
             if self.ejecutar_operacion(senal):
-                time.sleep(30)  # Esperar antes de siguiente operación
+                # Esperar antes de siguiente operación
+                time.sleep(30)
     
     def iniciar(self):
         """Iniciar bot de trading"""
+        self.cargar_config()
+        
         if not self.conectar_mt5():
             return False
         
         self.estado['activo'] = True
         
-        # Programar ciclos cada 10 segundos
+        # Programar ciclos de trading cada 10 segundos
         self.scheduler.add_job(
             self.ciclo_trading,
             'interval',
             seconds=10,
             id='trading_cycle'
         )
-        self.scheduler.start()
         
-        self.logger.info("🤖 Bot de trading iniciado")
-        asyncio.run(self.enviar_telegram("🤖 Bot de trading INICIADO"))
+        # Programar reconexión cada hora
+        self.scheduler.add_job(
+            self.conectar_mt5,
+            'interval',
+            hours=1,
+            id='reconnect'
+        )
+        
+        self.scheduler.start()
+        self.logger.info("🤖 Bot de trading INICIADO")
         return True
     
     def detener(self):
@@ -319,12 +307,11 @@ Ticket: {resultado.order}
         self.estado['activo'] = False
         self.scheduler.shutdown()
         mt5.shutdown()
-        
-        self.logger.info("🛑 Bot de trading detenido")
-        asyncio.run(self.enviar_telegram("🛑 Bot de trading DETENIDO"))
+        self.logger.info("🛑 Bot de trading DETENIDO")
     
-    def get_estado(self) -> Dict:
+    def get_estado(self):
         """Obtener estado actual"""
+        self.estado['ultima_actualizacion'] = datetime.now().isoformat()
         return self.estado
 
 # ================= BOT DE TELEGRAM =================
@@ -344,8 +331,7 @@ class TelegramBot:
             "/startbot - Iniciar trading\n"
             "/stopbot - Detener trading\n"
             "/estado - Estado detallado\n"
-            "/operaciones - Ver operaciones hoy\n"
-            "/capital - Ver capital\n"
+            "/operaciones - Operaciones hoy\n"
             "/help - Ayuda\n",
             parse_mode='Markdown'
         )
@@ -353,17 +339,15 @@ class TelegramBot:
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comando /status"""
         estado = self.trading_bot.get_estado()
-        activo = "✅ ACTIVO" if estado['activo'] else "❌ DETENIDO"
         
         mensaje = (
             f"📊 *Estado del Bot*\n\n"
-            f"• Bot: {activo}\n"
+            f"• Trading: {'✅ ACTIVO' if estado['activo'] else '❌ DETENIDO'}\n"
+            f"• MT5: {'✅ CONECTADO' if estado['conectado'] else '❌ DESCONECTADO'}\n"
             f"• Operaciones hoy: {estado['operaciones_hoy']}\n"
             f"• Ganancias: ${estado['ganancias_hoy']:.2f}\n"
             f"• Pérdidas: ${estado['perdidas_hoy']:.2f}\n"
-            f"• Neto: ${estado['ganancias_hoy'] - estado['perdidas_hoy']:.2f}\n"
-            f"• Capital: ${estado['capital']:.2f}\n"
-            f"• Modo: {estado['modo']}"
+            f"• Neto: ${estado['ganancias_hoy'] - estado['perdidas_hoy']:.2f}"
         )
         
         await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -384,26 +368,18 @@ class TelegramBot:
         """Comando /estado"""
         estado = self.trading_bot.get_estado()
         
-        # Verificar conexión MT5
-        try:
-            mt5.initialize()
-            account = mt5.account_info()
-            conexion = "✅ CONECTADO"
-            balance = f"${account.balance:.2f}"
-        except:
-            conexion = "❌ DESCONECTADO"
-            balance = "N/A"
-        
         mensaje = (
             f"📈 *Estado Detallado*\n\n"
             f"• Trading: {'✅ ACTIVO' if estado['activo'] else '❌ DETENIDO'}\n"
-            f"• MT5: {conexion}\n"
-            f"• Balance MT5: {balance}\n"
+            f"• MT5: {'✅ CONECTADO' if estado['conectado'] else '❌ DESCONECTADO'}\n"
+            f"• Última actualización: {estado['ultima_actualizacion'][11:19]}\n"
             f"• Operaciones hoy: {estado['operaciones_hoy']}\n"
-            f"• G/P Neto: ${estado['ganancias_hoy'] - estado['perdidas_hoy']:.2f}\n"
-            f"• Horario: {self.trading_bot.config.HORA_INICIO} - {self.trading_bot.config.HORA_FIN} UTC\n"
-            f"• Símbolo: {self.trading_bot.config.SYMBOL}\n"
-            f"• Riesgo/op: ${self.trading_bot.config.RIESGO_POR_OPERACION:.2f}"
+            f"• Ganancias: ${estado['ganancias_hoy']:.2f}\n"
+            f"• Pérdidas: ${estado['perdidas_hoy']:.2f}\n"
+            f"• Neto: ${estado['ganancias_hoy'] - estado['perdidas_hoy']:.2f}\n"
+            f"• Capital: ${estado['capital']:.2f}\n"
+            f"• Modo: {estado['modo']}\n"
+            f"• Horario: {self.trading_bot.config.HORA_INICIO} - {self.trading_bot.config.HORA_FIN} UTC"
         )
         
         await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -416,27 +392,11 @@ class TelegramBot:
             await update.message.reply_text("📭 No hay operaciones hoy")
         else:
             mensaje = f"📋 *Operaciones Hoy: {estado['operaciones_hoy']}*\n\n"
-            for i, op in enumerate(estado.get('operaciones', [])[-5:], 1):
-                mensaje += f"{i}. {op['tipo']} - ${op['resultado']:.2f}\n"
+            mensaje += f"• Ganancias: ${estado['ganancias_hoy']:.2f}\n"
+            mensaje += f"• Pérdidas: ${estado['perdidas_hoy']:.2f}\n"
+            mensaje += f"• Neto: ${estado['ganancias_hoy'] - estado['perdidas_hoy']:.2f}"
             
             await update.message.reply_text(mensaje, parse_mode='Markdown')
-    
-    async def capital(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Comando /capital"""
-        estado = self.trading_bot.get_estado()
-        
-        mensaje = (
-            f"💰 *Gestión de Capital*\n\n"
-            f"• Capital actual: ${estado['capital']:.2f}\n"
-            f"• Riesgo por operación: ${self.trading_bot.config.RIESGO_POR_OPERACION:.2f}\n"
-            f"• (% del capital: {(self.trading_bot.config.RIESGO_POR_OPERACION/estado['capital']*100):.1f}%)\n"
-            f"• Stop Loss: {self.trading_bot.config.STOP_LOSS_PIPS} pips\n"
-            f"• Take Profit: {self.trading_bot.config.TAKE_PROFIT_PIPS} pips\n"
-            f"• Ratio R:R: 1:2\n"
-            f"• Objetivo diario: ${self.trading_bot.config.OBJETIVO_DIARIO:.2f}"
-        )
-        
-        await update.message.reply_text(mensaje, parse_mode='Markdown')
     
     async def ayuda(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comando /help"""
@@ -448,10 +408,9 @@ class TelegramBot:
             "*/stopbot* - Detener trading\n"
             "*/estado* - Estado detallado\n"
             "*/operaciones* - Ver operaciones del día\n"
-            "*/capital* - Gestión de capital\n"
             "*/help* - Esta ayuda\n\n"
-            "📊 *Notas:*\n"
-            "• El bot opera de 08:00 a 12:00 UTC\n"
+            "📊 *Horario de trading:*\n"
+            "• 08:00 - 12:00 UTC (Automático)\n"
             "• Máximo 5 operaciones/día\n"
             "• Stop automático en ganancias/pérdidas"
         )
@@ -466,7 +425,6 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("stopbot", self.stopbot))
         self.app.add_handler(CommandHandler("estado", self.estado_detallado))
         self.app.add_handler(CommandHandler("operaciones", self.operaciones))
-        self.app.add_handler(CommandHandler("capital", self.capital))
         self.app.add_handler(CommandHandler("help", self.ayuda))
     
     async def run(self):
@@ -476,6 +434,8 @@ class TelegramBot:
         
         await self.app.initialize()
         await self.app.start()
+        
+        # Para Webhook (Render necesita esto)
         await self.app.updater.start_polling()
         
         print("🤖 Bot de Telegram iniciado")
@@ -483,218 +443,118 @@ class TelegramBot:
         # Mantener corriendo
         await asyncio.Event().wait()
 
-# ================= SERVER WEB (para Render) =================
-from flask import Flask, jsonify, request
-import threading
+# ================= SERVER WEB (Flask para Render) =================
+app = Flask(__name__)
+trading_bot_instance = None
+telegram_bot_instance = None
 
-class WebServer:
-    def __init__(self, trading_bot: TradingBot, port=5000):
-        self.trading_bot = trading_bot
-        self.port = port
-        self.app = Flask(__name__)
-        self.setup_routes()
-    
-    def setup_routes(self):
-        """Configurar rutas web"""
-        @self.app.route('/')
-        def index():
-            return jsonify({
-                "status": "online",
-                "service": "Trading Bot Server",
-                "version": "4.0"
-            })
-        
-        @self.app.route('/status')
-        def status():
-            estado = self.trading_bot.get_estado()
-            return jsonify(estado)
-        
-        @self.app.route('/start', methods=['POST'])
-        def start():
-            if self.trading_bot.iniciar():
-                return jsonify({"success": True, "message": "Bot iniciado"})
-            return jsonify({"success": False, "message": "Error al iniciar"})
-        
-        @self.app.route('/stop', methods=['POST'])
-        def stop():
-            self.trading_bot.detener()
-            return jsonify({"success": True, "message": "Bot detenido"})
-        
-        @self.app.route('/health')
-        def health():
-            return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-    
-    def run(self):
-        """Ejecutar servidor web"""
-        self.app.run(host='0.0.0.0', port=self.port, debug=False, use_reloader=False)
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Trading Bot Server",
+        "version": "1.0",
+        "uptime": get_uptime()
+    })
 
-# ================= SISTEMA PRINCIPAL =================
-class SistemaTradingCompleto:
-    def __init__(self):
-        self.config = Config()
-        self.trading_bot = None
-        self.telegram_bot = None
-        self.web_server = None
-        
-    def cargar_configuracion(self):
-        """Cargar configuración desde variables de entorno (para Render)"""
-        # Para Render, usa variables de entorno
-        self.config.MT5_ACCOUNT = int(os.getenv('MT5_ACCOUNT', self.config.MT5_ACCOUNT))
-        self.config.MT5_PASSWORD = os.getenv('MT5_PASSWORD', self.config.MT5_PASSWORD)
-        self.config.MT5_SERVER = os.getenv('MT5_SERVER', self.config.MT5_SERVER)
-        self.config.TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', self.config.TELEGRAM_TOKEN)
-        self.config.TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', self.config.TELEGRAM_CHAT_ID)
-        
-        print("📋 Configuración cargada")
-        print(f"   MT5 Account: {self.config.MT5_ACCOUNT}")
-        print(f"   Telegram Token: {'✅ Configurado' if self.config.TELEGRAM_TOKEN != 'TU_TELEGRAM_BOT_TOKEN' else '❌ NO configurado'}")
+@app.route('/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/status')
+def status():
+    if trading_bot_instance:
+        return jsonify(trading_bot_instance.get_estado())
+    return jsonify({"error": "Bot no inicializado"})
+
+@app.route('/start', methods=['POST'])
+def start_bot():
+    if trading_bot_instance and trading_bot_instance.iniciar():
+        return jsonify({"success": True, "message": "Bot iniciado"})
+    return jsonify({"success": False, "message": "Error al iniciar"})
+
+@app.route('/stop', methods=['POST'])
+def stop_bot():
+    if trading_bot_instance:
+        trading_bot_instance.detener()
+        return jsonify({"success": True, "message": "Bot detenido"})
+    return jsonify({"success": False, "message": "Bot no inicializado"})
+
+def get_uptime():
+    """Calcular tiempo activo"""
+    if not hasattr(get_uptime, 'start_time'):
+        get_uptime.start_time = datetime.now()
+    uptime = datetime.now() - get_uptime.start_time
+    return str(uptime).split('.')[0]
+
+# ================= MANTENER ACTIVO EL SERVER =================
+def ping_self():
+    """Ping automático para evitar que Render duerma"""
+    import requests
+    import threading
     
-    async def iniciar_sistema(self):
-        """Iniciar todo el sistema"""
-        print("🚀 Iniciando Sistema de Trading Completo...")
-        
-        # 1. Cargar configuración
-        self.cargar_configuracion()
-        
-        # 2. Crear trading bot
-        self.trading_bot = TradingBot(self.config)
-        
-        # 3. Crear bot de Telegram si hay token
-        if self.config.TELEGRAM_TOKEN and self.config.TELEGRAM_TOKEN != "TU_TELEGRAM_BOT_TOKEN":
-            self.telegram_bot = TelegramBot(self.config.TELEGRAM_TOKEN, self.trading_bot)
+    def ping():
+        while True:
+            try:
+                # Usa el URL de tu app en Render
+                requests.get('https://your-app.onrender.com/health')
+                print(f"✅ Ping realizado: {datetime.now().strftime('%H:%M:%S')}")
+            except:
+                print("❌ Error en ping")
+            time.sleep(300)  # Cada 5 minutos
+    
+    thread = threading.Thread(target=ping, daemon=True)
+    thread.start()
+
+# ================= INICIALIZACIÓN =================
+def init_system():
+    """Inicializar todo el sistema"""
+    global trading_bot_instance, telegram_bot_instance
+    
+    print("🚀 Iniciando Sistema de Trading...")
+    
+    # 1. Crear configuración
+    config = Config()
+    
+    # 2. Crear y configurar trading bot
+    trading_bot_instance = TradingBot(config)
+    trading_bot_instance.cargar_config()
+    
+    # 3. Iniciar bot de Telegram si hay token
+    if config.TELEGRAM_TOKEN and config.TELEGRAM_TOKEN != "":
+        try:
+            telegram_bot_instance = TelegramBot(config.TELEGRAM_TOKEN, trading_bot_instance)
             
             # Iniciar Telegram en segundo plano
             telegram_thread = threading.Thread(
-                target=asyncio.run,
-                args=(self.telegram_bot.run(),),
+                target=lambda: asyncio.run(telegram_bot_instance.run()),
                 daemon=True
             )
             telegram_thread.start()
-            print("🤖 Bot de Telegram iniciado")
-        
-        # 4. Iniciar servidor web (para Render)
-        self.web_server = WebServer(self.trading_bot, port=int(os.getenv('PORT', 5000)))
-        web_thread = threading.Thread(
-            target=self.web_server.run,
-            daemon=True
-        )
-        web_thread.start()
-        print("🌐 Servidor web iniciado")
-        
-        # 5. Iniciar trading bot automáticamente si está en horario
-        if self.trading_bot.dentro_horario():
-            self.trading_bot.iniciar()
-            print("⏰ Iniciando trading (dentro de horario)")
-        
-        # 6. Mantener el sistema corriendo
-        print("✅ Sistema completamente operativo")
-        print("📊 Accede a:")
-        print("   • Telegram: Busca tu bot")
-        print("   • Web: http://localhost:5000")
-        print("   • Logs: trading_bot.log")
-        
-        # Mantener proceso activo
-        while True:
-            await asyncio.sleep(3600)  # Esperar 1 hora
+            print("🤖 Bot de Telegram iniciado en segundo plano")
+        except Exception as e:
+            print(f"❌ Error iniciando Telegram: {e}")
     
-    def ejecutar(self):
-        """Punto de entrada principal"""
-        asyncio.run(self.iniciar_sistema())
+    # 4. Iniciar trading automáticamente si está en horario
+    if trading_bot_instance.dentro_horario():
+        trading_bot_instance.iniciar()
+        print("⏰ Trading iniciado automáticamente (dentro de horario)")
+    
+    # 5. Iniciar sistema de ping (opcional, descomenta si necesitas)
+    # ping_self()
+    
+    print("✅ Sistema completamente operativo")
+    print(f"📊 Accede a: https://your-app.onrender.com")
+    print(f"📱 Control por Telegram: Busca tu bot")
 
-# ================= ARCHIVOS ADICIONALES NECESARIOS =================
-
-# requirements.txt (guárdalo como archivo separado)
-REQUIREMENTS = """MetaTrader5>=5.0.43
-pandas>=1.5.0
-numpy>=1.23.0
-python-telegram-bot>=20.0
-Flask>=2.3.0
-APScheduler>=3.10.0
-gunicorn>=20.1.0
-"""
-
-# runtime.txt (para Render)
-RUNTIME = "python-3.9.0"
-
-# Procfile (para Render)
-PROCFILE = "web: gunicorn main:app"
-
-# ================= INSTRUCCIONES PASO A PASO =================
-def mostrar_instrucciones():
-    print("\n" + "="*80)
-    print("🚀 GUÍA PARA DESPLEGAR EN SERVER GRATUITO")
-    print("="*80)
-    
-    print("\n📋 1. OBTENER BOT DE TELEGRAM:")
-    print("   a. Busca @BotFather en Telegram")
-    print("   b. Envía /newbot")
-    print("   c. Nómbralo (ej: MiTradingBot)")
-    print("   d. Copia el token (ej: 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11)")
-    print("   e. Para obtener tu CHAT_ID:")
-    print("      - Busca @userinfobot en Telegram")
-    print("      - Envía /start")
-    print("      - Copia tu ID (ej: 123456789)")
-    
-    print("\n🌐 2. CREAR CUENTA EN RENDER (GRATIS):")
-    print("   a. Ve a https://render.com")
-    print("   b. Regístrate con GitHub")
-    print("   c. Click en 'New' → 'Web Service'")
-    
-    print("\n📦 3. PREPARAR ARCHIVOS EN GITHUB:")
-    print("   Crea un repositorio con estos archivos:")
-    print("   ├── main.py          (este código)")
-    print("   ├── requirements.txt (dependencias)")
-    print("   ├── runtime.txt      (python-3.9.0)")
-    print("   └── Procfile         (web: gunicorn main:app)")
-    
-    print("\n⚙️  4. CONFIGURAR EN RENDER:")
-    print("   En 'Environment Variables', añade:")
-    print("   • MT5_ACCOUNT = tu_numero_cuenta_demo")
-    print("   • MT5_PASSWORD = tu_password_demo")
-    print("   • MT5_SERVER = MetaQuotes-Demo")
-    print("   • TELEGRAM_TOKEN = token_de_tu_bot")
-    print("   • TELEGRAM_CHAT_ID = tu_chat_id")
-    
-    print("\n🚀 5. DESPLEGAR:")
-    print("   a. Conecta tu repositorio de GitHub")
-    print("   b. Render detectará automáticamente los archivos")
-    print("   c. Click en 'Create Web Service'")
-    print("   d. Espera 5-10 minutos para el despliegue")
-    
-    print("\n📱 6. USAR EL SISTEMA:")
-    print("   a. Busca tu bot en Telegram")
-    print("   b. Envía /start para ver comandos")
-    print("   c. Usa /startbot para iniciar trading")
-    print("   d. El bot funcionará 24/7 en el server")
-    
-    print("\n📊 7. MONITOREAR:")
-    print("   • Logs: En Render dashboard → 'Logs'")
-    print("   • Estado: En Telegram con /status")
-    print("   • Web: https://tudominio.onrender.com")
-    
-    print("\n" + "="*80)
-    print("💰 COSTO: GRATIS (hasta 750 horas/mes en Render)")
-    print("⏰ El bot se dormirá después de 15 min inactivo (gratis)")
-    print("🔧 Para evitar sleep: Pings cada 10 min o upgrade a plan pago")
-    print("="*80)
-
-# ================= EJECUCIÓN LOCAL =================
+# ================= EJECUCIÓN EN RENDER =================
 if __name__ == "__main__":
-    # Mostrar instrucciones
-    mostrar_instrucciones()
+    # Inicializar sistema al arrancar
+    init_system()
     
-    respuesta = input("\n¿Continuar con ejecución local? (s/n): ").lower().strip()
-    
-    if respuesta == 's':
-        print("\nIniciando sistema localmente...")
-        sistema = SistemaTradingCompleto()
-        
-        try:
-            sistema.ejecutar()
-        except KeyboardInterrupt:
-            print("\n🛑 Sistema detenido por usuario")
-    else:
-        print("\nPara desplegar en Render:")
-        print("1. Guarda este código como main.py")
-        print("2. Crea los archivos requirements.txt, runtime.txt y Procfile")
-        print("3. Sigue las instrucciones arriba")
+    # Ejecutar servidor Flask (Render necesita esto)
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
